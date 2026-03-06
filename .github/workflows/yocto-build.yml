@@ -86,9 +86,26 @@ jobs:
         run: |
           set -euxo pipefail
           DEPLOY="$GITHUB_WORKSPACE/work/yocto/build/tmp/deploy/images/${{ github.event.inputs.machine }}"
+          ARTIFACT_DIR="$GITHUB_WORKSPACE/artifacts"
+          MACHINE_INPUT="${{ github.event.inputs.machine }}"
+          mkdir -p "$ARTIFACT_DIR"
           ls -lah "$DEPLOY"
-          tar -C "$DEPLOY" -czf "$GITHUB_WORKSPACE/yocto-images-${{ github.event.inputs.machine }}.tar.gz" \
-            *.wic *.update.img update.img parameter loader.bin idblock.img uboot.img boot.img rootfs.img || true
+
+          WIC_LINK="$DEPLOY/core-image-minimal-${MACHINE_INPUT}.rootfs.wic"
+          UPDATE_LINK="$DEPLOY/update.img"
+
+          [ -e "$WIC_LINK" ]
+          [ -e "$UPDATE_LINK" ]
+
+          WIC_REAL="$(readlink -f "$WIC_LINK" || realpath "$WIC_LINK")"
+          UPDATE_REAL="$(readlink -f "$UPDATE_LINK" || realpath "$UPDATE_LINK")"
+
+          cp -f "$WIC_REAL" "$ARTIFACT_DIR/core-image-minimal-${MACHINE_INPUT}.rootfs.wic"
+          cp -f "$UPDATE_REAL" "$ARTIFACT_DIR/update.img"
+
+          ls -lah "$ARTIFACT_DIR"
+          tar -C "$ARTIFACT_DIR" -czf "$GITHUB_WORKSPACE/yocto-images-${MACHINE_INPUT}.tar.gz" \
+            *.wic update.img
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
