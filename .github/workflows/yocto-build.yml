@@ -1,4 +1,4 @@
-name: Mixtile Yocto Build
+name: Mixtile Yocto Full Build
 
 on:
   workflow_dispatch:
@@ -8,13 +8,6 @@ on:
         required: true
         default: "mixtile-core3588e"
         type: string
-  push:
-    branches: [ main ]
-  pull_request:
-
-concurrency:
-  group: yocto-${{ github.ref }}
-  cancel-in-progress: true
 
 env:
   MANIFEST_URL: https://github.com/mixtile-rockchip/manifests.git
@@ -22,11 +15,19 @@ env:
   MANIFEST_FILE: rk3588_linux6.1_release.xml
 
 jobs:
-  smoke:
-    name: Smoke Parse (${{ github.event.inputs.machine || 'mixtile-core3588e' }})
+  full-build:
+    name: Full Build (${{ github.event.inputs.machine }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 360
     steps:
+      - name: Free disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android || true
+          sudo apt-get clean
+          df -h
+
       - name: Install dependencies
         shell: bash
         run: |
@@ -44,14 +45,14 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/work"
           cd "$GITHUB_WORKSPACE/work"
           repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" -m "$MANIFEST_FILE"
-          repo sync -c -j4 --no-tags --no-clone-bundle \
+          repo sync -c -j8 --no-tags --no-clone-bundle \
             yocto/meta-browser yocto/meta-clang yocto/meta-openembedded \
             yocto/meta-lts-mixins yocto/meta-rockchip yocto/meta-mixtile yocto/poky yocto/build/conf
 
-      - name: Configure and parse
+      - name: Build core-image-minimal
         shell: bash
         env:
-          MACHINE_INPUT: ${{ github.event.inputs.machine || 'mixtile-core3588e' }}
+          MACHINE_INPUT: ${{ github.event.inputs.machine }}
         run: |
           set -euxo pipefail
           cd "$GITHUB_WORKSPACE/work/yocto"
@@ -69,4 +70,31 @@ jobs:
           grep -q '^INHERIT:append[[:space:]]*=.*rockchip-image' conf/local.conf \
             || echo 'INHERIT:append = " rockchip-image"' >> conf/local.conf
 
-          bitbake -p
+          # Workaround for Ubuntu GitHub runner userns restrictions
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sh -c 'echo 0 > /proc/sys/kernel/apparmor_restrict_unprivileged_userns' || true
+          fi
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ] && \
+             [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = "1" ]; then
+            sed -i 's/bb.utils.disable_network(uid, gid)/pass  # disabled on GitHub runner/' poky/bitbake/bin/bitbake-worker
+          fi
+
+          bitbake core-image-minimal
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          set -euxo pipefail
+          DEPLOY="$GITHUB_WORKSPACE/work/yocto/build/tmp/deploy/images/${{ github.event.inputs.machine }}"
+          ls -lah "$DEPLOY"
+          tar -C "$DEPLOY" -czf "$GITHUB_WORKSPACE/yocto-images-${{ github.event.inputs.machine }}.tar.gz" \
+            *.wic *.update.img update.img parameter loader.bin idblock.img uboot.img boot.img rootfs.img || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: yocto-images-${{ github.event.inputs.machine }}
+          path: |
+            ${{ github.workspace }}/yocto-images-${{ github.event.inputs.machine }}.tar.gz
+            ${{ github.workspace }}/work/yocto/build/tmp/log/cooker/**/console-latest.log
+          if-no-files-found: warn
