@@ -1,0 +1,72 @@
+name: Mixtile Yocto Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      machine:
+        description: "Yocto MACHINE to build"
+        required: true
+        default: "mixtile-core3588e"
+        type: string
+  push:
+    branches: [ main ]
+  pull_request:
+
+concurrency:
+  group: yocto-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MANIFEST_URL: https://github.com/mixtile-rockchip/manifests.git
+  MANIFEST_BRANCH: rk3588-linux-6.1-rkr6
+  MANIFEST_FILE: rk3588_linux6.1_release.xml
+
+jobs:
+  smoke:
+    name: Smoke Parse (${{ github.event.inputs.machine || 'mixtile-core3588e' }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            gawk wget git diffstat unzip texinfo gcc build-essential chrpath socat cpio \
+            python3 python3-pip python3-pexpect xz-utils debianutils iputils-ping \
+            python3-git python3-jinja2 libsdl1.2-dev zstd liblz4-tool file locales libacl1 repo
+
+      - name: Init and sync Yocto repos
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/work"
+          cd "$GITHUB_WORKSPACE/work"
+          repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" -m "$MANIFEST_FILE"
+          repo sync -c -j4 --no-tags --no-clone-bundle \
+            yocto/meta-browser yocto/meta-clang yocto/meta-openembedded \
+            yocto/meta-lts-mixins yocto/meta-rockchip yocto/meta-mixtile yocto/poky yocto/build/conf
+
+      - name: Configure and parse
+        shell: bash
+        env:
+          MACHINE_INPUT: ${{ github.event.inputs.machine || 'mixtile-core3588e' }}
+        run: |
+          set -euxo pipefail
+          cd "$GITHUB_WORKSPACE/work/yocto"
+          set +u
+          source oe-init-build-env build
+          set -u
+
+          grep -q 'meta-mixtile' conf/bblayers.conf || \
+            echo 'BBLAYERS += "${TOPDIR}/../meta-mixtile"' >> conf/bblayers.conf
+
+          grep -q '^MACHINE[[:space:]]*=' conf/local.conf \
+            && sed -i "s/^MACHINE[[:space:]]*=.*/MACHINE = \"${MACHINE_INPUT}\"/" conf/local.conf \
+            || echo "MACHINE = \"${MACHINE_INPUT}\"" >> conf/local.conf
+
+          grep -q '^INHERIT:append[[:space:]]*=.*rockchip-image' conf/local.conf \
+            || echo 'INHERIT:append = " rockchip-image"' >> conf/local.conf
+
+          bitbake -p
