@@ -9,6 +9,10 @@ on:
         default: "mixtile-core3588e"
         type: string
 
+permissions:
+  contents: write
+  actions: read
+
 env:
   MANIFEST_URL: https://github.com/mixtile-rockchip/manifests.git
   MANIFEST_BRANCH: rk3588-linux-6.1-rkr6
@@ -82,13 +86,18 @@ jobs:
           bitbake core-image-minimal
 
       - name: Collect artifacts
+        id: prep_release
         shell: bash
+        env:
+          MACHINE_INPUT: ${{ github.event.inputs.machine }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          HEAD_SHA: ${{ github.sha }}
         run: |
           set -euxo pipefail
-          DEPLOY="$GITHUB_WORKSPACE/work/yocto/build/tmp/deploy/images/${{ github.event.inputs.machine }}"
-          ARTIFACT_DIR="$GITHUB_WORKSPACE/artifacts"
-          MACHINE_INPUT="${{ github.event.inputs.machine }}"
-          mkdir -p "$ARTIFACT_DIR"
+          DEPLOY="$GITHUB_WORKSPACE/work/yocto/build/tmp/deploy/images/${MACHINE_INPUT}"
+          RELEASE_DIR="$GITHUB_WORKSPACE/release-assets"
+          RELEASE_DATE="$(date -u +%Y%m%d)"
+          mkdir -p "$RELEASE_DIR"
           ls -lah "$DEPLOY"
 
           WIC_LINK="$DEPLOY/core-image-minimal-${MACHINE_INPUT}.rootfs.wic"
@@ -101,19 +110,72 @@ jobs:
           UPDATE_REAL="$(readlink -f "$UPDATE_LINK" || realpath "$UPDATE_LINK")"
           WIC_NAME="$(basename "$WIC_REAL")"
           UPDATE_NAME="$(basename "$UPDATE_REAL")"
+          TAG_NAME="${MACHINE_INPUT}-${RELEASE_DATE}"
+          RELEASE_TITLE="Mixtile ${MACHINE_INPUT} Yocto Image ${RELEASE_DATE}"
 
-          cp -f "$WIC_REAL" "$ARTIFACT_DIR/$WIC_NAME"
-          cp -f "$UPDATE_REAL" "$ARTIFACT_DIR/$UPDATE_NAME"
+          cp -f "$WIC_REAL" "$RELEASE_DIR/$WIC_NAME"
+          cp -f "$UPDATE_REAL" "$RELEASE_DIR/$UPDATE_NAME"
 
-          ls -lah "$ARTIFACT_DIR"
-          tar -C "$ARTIFACT_DIR" -czf "$GITHUB_WORKSPACE/yocto-images-${MACHINE_INPUT}.tar.gz" \
-            "$WIC_NAME" "$UPDATE_NAME"
+          (
+            cd "$RELEASE_DIR"
+            sha256sum "$WIC_NAME" "$UPDATE_NAME" > checksums.txt
+          )
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: yocto-images-${{ github.event.inputs.machine }}
-          path: |
-            ${{ github.workspace }}/yocto-images-${{ github.event.inputs.machine }}.tar.gz
-            ${{ github.workspace }}/work/yocto/build/tmp/log/cooker/**/console-latest.log
-          if-no-files-found: warn
+          cat > "$RELEASE_DIR/release-notes.md" <<EOF
+          # Mixtile ${MACHINE_INPUT} Yocto Image Release
+
+          This release is generated automatically from a successful GitHub Actions build.
+
+          - Workflow: \`${{ github.workflow }}\`
+          - Machine: \`${MACHINE_INPUT}\`
+          - Source branch: \`${{ github.ref_name }}\`
+          - Source commit: \`${HEAD_SHA}\`
+          - Run URL: ${RUN_URL}
+          - Built image: \`core-image-minimal\`
+
+          Assets:
+
+          - \`${WIC_NAME}\`
+          - \`${UPDATE_NAME}\`
+          - \`checksums.txt\`
+          EOF
+
+          ls -lah "$RELEASE_DIR"
+
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "release_title=${RELEASE_TITLE}" >> "$GITHUB_OUTPUT"
+          echo "release_dir=${RELEASE_DIR}" >> "$GITHUB_OUTPUT"
+          echo "wic_name=${WIC_NAME}" >> "$GITHUB_OUTPUT"
+          echo "update_name=${UPDATE_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ steps.prep_release.outputs.tag_name }}
+          RELEASE_TITLE: ${{ steps.prep_release.outputs.release_title }}
+          RELEASE_DIR: ${{ steps.prep_release.outputs.release_dir }}
+          WIC_NAME: ${{ steps.prep_release.outputs.wic_name }}
+          UPDATE_NAME: ${{ steps.prep_release.outputs.update_name }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" \
+              "$RELEASE_DIR/$WIC_NAME" \
+              "$RELEASE_DIR/$UPDATE_NAME" \
+              "$RELEASE_DIR/checksums.txt" \
+              --clobber
+            gh release edit "$TAG_NAME" \
+              --title "$RELEASE_TITLE" \
+              --notes-file "$RELEASE_DIR/release-notes.md" \
+              --latest
+          else
+            gh release create "$TAG_NAME" \
+              "$RELEASE_DIR/$WIC_NAME" \
+              "$RELEASE_DIR/$UPDATE_NAME" \
+              "$RELEASE_DIR/checksums.txt" \
+              --title "$RELEASE_TITLE" \
+              --notes-file "$RELEASE_DIR/release-notes.md" \
+              --target "${{ github.sha }}" \
+              --latest
+          fi
