@@ -99,13 +99,15 @@ jobs:
 
           WIC_REAL="$(readlink -f "$WIC_LINK" || realpath "$WIC_LINK")"
           UPDATE_REAL="$(readlink -f "$UPDATE_LINK" || realpath "$UPDATE_LINK")"
+          WIC_NAME="$(basename "$WIC_REAL")"
+          UPDATE_NAME="$(basename "$UPDATE_REAL")"
 
-          cp -f "$WIC_REAL" "$ARTIFACT_DIR/core-image-minimal-${MACHINE_INPUT}.rootfs.wic"
-          cp -f "$UPDATE_REAL" "$ARTIFACT_DIR/update.img"
+          cp -f "$WIC_REAL" "$ARTIFACT_DIR/$WIC_NAME"
+          cp -f "$UPDATE_REAL" "$ARTIFACT_DIR/$UPDATE_NAME"
 
           ls -lah "$ARTIFACT_DIR"
           tar -C "$ARTIFACT_DIR" -czf "$GITHUB_WORKSPACE/yocto-images-${MACHINE_INPUT}.tar.gz" \
-            *.wic update.img
+            "$WIC_NAME" "$UPDATE_NAME"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
